@@ -1,0 +1,7 @@
+{
+  "name": "Sreshta Medbuddy",
+  "description": "A personal health tracker for fever and prescriptions with AI-powered insights and medication scanning.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

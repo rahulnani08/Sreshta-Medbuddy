@@ -33,3 +33,9 @@ export interface Prescription {
 export type ViewState = 'HOME' | 'USER_PROFILE';
 
 export type TabState = 'FEVER';
+
+export interface SyncConfig {
+  token: string;
+  repo: string; // "username/repository"
+  path?: string; // default "medbuddy_data.json"
+}

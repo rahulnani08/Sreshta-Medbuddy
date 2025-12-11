@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { User, UserType, ViewState, TabState } from './types';
-import { getUsers, saveUser, deleteUser, exportData, importData } from './services/storageService';
+import { User, UserType, ViewState, TabState, SyncConfig } from './types';
+import { getUsers, saveUser, deleteUser, exportData, importData, getSyncConfig, saveSyncConfig, clearSyncConfig, syncFromCloud, getSyncStatus, subscribe } from './services/storageService';
 import { FeverTracker } from './components/FeverTracker';
 import { PrescriptionList } from './components/PrescriptionList';
 import { Button, Card, Input, Modal, cn } from './components/Shared';
-import { UserPlus, ArrowLeft, Settings, Activity, Pill, Download, Upload, Trash2, Thermometer } from 'lucide-react';
+import { UserPlus, ArrowLeft, Settings, Activity, Pill, Download, Upload, Trash2, Thermometer, Cloud, Check, Loader2, AlertCircle, Github, RefreshCw } from 'lucide-react';
+import { format } from 'date-fns';
 
 type RootTab = 'TRACKER' | 'MEDICINES';
 
@@ -14,18 +15,48 @@ const App: React.FC = () => {
   
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
-  const [activeUserProfileTab, setActiveUserProfileTab] = useState<TabState>('FEVER');
   
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  
+  // New User Form
   const [newUserName, setNewUserName] = useState('');
   const [newUserType, setNewUserType] = useState<UserType>(UserType.ADULT);
 
-  useEffect(() => {
+  // Sync State
+  const [syncStatus, setSyncStatus] = useState(getSyncStatus());
+  const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
+  const [tempToken, setTempToken] = useState('');
+  const [tempRepo, setTempRepo] = useState('');
+
+  const refreshData = () => {
     setUsers(getUsers());
+    setSyncStatus(getSyncStatus());
+    setSyncConfig(getSyncConfig());
+  };
+
+  useEffect(() => {
+    refreshData();
+    // Try initial pull if configured
+    if (getSyncConfig()) {
+        syncFromCloud();
+    }
+    const unsubscribe = subscribe(refreshData);
+    return () => unsubscribe();
   }, []);
 
-  const handleAddUser = () => {
+  // Update Settings form when opening
+  useEffect(() => {
+    if (isSettingsOpen) {
+      const current = getSyncConfig();
+      if (current) {
+        setTempToken(current.token);
+        setTempRepo(current.repo);
+      }
+    }
+  }, [isSettingsOpen]);
+
+  const handleAddUser = async () => {
     if (!newUserName) return;
     const newUser: User = {
       id: crypto.randomUUID(),
@@ -33,8 +64,7 @@ const App: React.FC = () => {
       type: newUserType,
       createdAt: Date.now()
     };
-    saveUser(newUser);
-    setUsers(getUsers());
+    await saveUser(newUser);
     setIsAddUserOpen(false);
     setNewUserName('');
   };
@@ -42,7 +72,6 @@ const App: React.FC = () => {
   const handleUserSelect = (user: User) => {
     setSelectedUser(user);
     setView('USER_PROFILE');
-    setActiveUserProfileTab('FEVER');
   };
 
   const handleBack = () => {
@@ -50,10 +79,9 @@ const App: React.FC = () => {
     setSelectedUser(null);
   };
 
-  const handleDeleteUser = (userId: string) => {
+  const handleDeleteUser = async (userId: string) => {
       if(window.confirm('Delete this user and all their data? This cannot be undone.')) {
-          deleteUser(userId);
-          setUsers(getUsers());
+          await deleteUser(userId);
       }
   };
 
@@ -75,7 +103,6 @@ const App: React.FC = () => {
           const success = importData(ev.target?.result as string);
           if (success) {
               alert('Data imported successfully!');
-              setUsers(getUsers());
               setIsSettingsOpen(false);
           } else {
               alert('Invalid backup file.');
@@ -84,17 +111,49 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
+  const handleSaveSyncConfig = async () => {
+    if (!tempToken || !tempRepo) return;
+    await saveSyncConfig({
+      token: tempToken,
+      repo: tempRepo,
+      path: 'medbuddy_data.json'
+    });
+    alert('Sync configured! The app will now try to sync with your repository.');
+  };
+
+  const handleDisconnectSync = () => {
+    if (window.confirm('Stop syncing? Data will remain on this device but stop updating to GitHub.')) {
+      clearSyncConfig();
+      setTempToken('');
+      setTempRepo('');
+      refreshData();
+    }
+  };
+
+  const handleForceSync = async () => {
+    await syncFromCloud(true);
+  };
+
   // --- Main Views ---
 
   const renderTrackerView = () => (
     <div className="max-w-md mx-auto min-h-screen p-6 pb-24">
       <header className="flex justify-between items-center mb-8">
         <div>
-           <h1 className="text-2xl font-bold text-slate-800 tracking-tight">Fever Tracker</h1>
+           <h1 className="text-2xl font-bold text-slate-800 tracking-tight flex items-center gap-2">
+             Fever Tracker
+             {syncStatus.isSyncing && <Loader2 className="w-4 h-4 animate-spin text-teal-500" />}
+           </h1>
            <p className="text-slate-500 text-sm">Select a profile to log temperature</p>
         </div>
-        <button onClick={() => setIsSettingsOpen(true)} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200">
+        <button onClick={() => setIsSettingsOpen(true)} className="relative p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200 transition-colors">
            <Settings className="w-5 h-5" />
+           {syncConfig && !syncStatus.isSyncing && !syncStatus.syncError && (
+             <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white"></span>
+           )}
+           {syncStatus.syncError && (
+             <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
+           )}
         </button>
       </header>
 
@@ -137,11 +196,20 @@ const App: React.FC = () => {
     <div className="max-w-md mx-auto min-h-screen p-6 bg-slate-50">
        <header className="flex justify-between items-center mb-6">
         <div>
-           <h1 className="text-2xl font-bold text-slate-800 tracking-tight">Medicine Cabinet</h1>
+           <h1 className="text-2xl font-bold text-slate-800 tracking-tight flex items-center gap-2">
+             Medicine Cabinet
+             {syncStatus.isSyncing && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+           </h1>
            <p className="text-slate-500 text-sm">Manage family prescriptions</p>
         </div>
-        <button onClick={() => setIsSettingsOpen(true)} className="p-2 bg-white border border-slate-200 rounded-full text-slate-600 hover:bg-slate-50">
+        <button onClick={() => setIsSettingsOpen(true)} className="relative p-2 bg-white border border-slate-200 rounded-full text-slate-600 hover:bg-slate-50 transition-colors">
            <Settings className="w-5 h-5" />
+           {syncConfig && !syncStatus.isSyncing && !syncStatus.syncError && (
+             <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white"></span>
+           )}
+           {syncStatus.syncError && (
+             <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
+           )}
         </button>
       </header>
       <PrescriptionList users={users} />
@@ -187,7 +255,7 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        <div className="p-6">
+        <div className="p-6 pb-24">
           <FeverTracker user={selectedUser} />
         </div>
 
@@ -238,16 +306,83 @@ const App: React.FC = () => {
       </Modal>
 
       <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Settings">
-        <div className="space-y-6">
+        <div className="space-y-8 pb-4">
+           
+           {/* CLOUD SYNC SECTION */}
            <div>
-             <h4 className="font-semibold text-slate-800 mb-2">Data Management</h4>
-             <p className="text-xs text-slate-500 mb-4">Export data to backup. Import JSON to restore.</p>
+             <h4 className="font-semibold text-slate-800 mb-2 flex items-center gap-2">
+               <Cloud className="w-4 h-4 text-blue-500" /> Cloud Sync (GitHub)
+             </h4>
+             <div className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+                {!syncConfig ? (
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Sync data across devices using a free GitHub private repository.
+                      <br/>1. Create a <a href="https://github.com/new" target="_blank" className="text-blue-600 underline">new repository</a>.
+                      <br/>2. Generate a <a href="https://github.com/settings/tokens" target="_blank" className="text-blue-600 underline">Personal Access Token (Classic)</a> with 'repo' scope.
+                    </p>
+                    <Input 
+                      label="GitHub Token" 
+                      type="password"
+                      placeholder="ghp_xxxxxxxxxxxx" 
+                      value={tempToken} 
+                      onChange={(e) => setTempToken(e.target.value)} 
+                    />
+                    <Input 
+                      label="Repository (username/repo)" 
+                      placeholder="johndoe/my-health-data" 
+                      value={tempRepo} 
+                      onChange={(e) => setTempRepo(e.target.value)} 
+                    />
+                    <Button onClick={handleSaveSyncConfig} disabled={!tempToken || !tempRepo} className="w-full bg-slate-800 hover:bg-slate-900 text-white shadow-slate-900/10">
+                      <Github className="w-4 h-4" /> Connect GitHub
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3 text-sm text-slate-700 bg-white p-3 rounded-lg border border-slate-100">
+                      <div className="bg-green-100 p-1.5 rounded-full">
+                         <Check className="w-4 h-4 text-green-600" />
+                      </div>
+                      <div className="overflow-hidden">
+                        <p className="font-medium truncate">Connected to {syncConfig.repo}</p>
+                        <p className="text-xs text-slate-400">
+                          Last sync: {syncStatus.lastSyncTime ? format(syncStatus.lastSyncTime, 'MMM d, h:mm a') : 'Never'}
+                        </p>
+                      </div>
+                    </div>
+                    
+                    {syncStatus.syncError && (
+                      <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 p-2 rounded-lg">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <p>{syncStatus.syncError}</p>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                       <Button variant="secondary" onClick={handleForceSync} disabled={syncStatus.isSyncing} className="text-xs h-9">
+                         {syncStatus.isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} Sync Now
+                       </Button>
+                       <Button variant="danger" onClick={handleDisconnectSync} className="text-xs h-9 bg-white border border-red-100">
+                         Disconnect
+                       </Button>
+                    </div>
+                  </div>
+                )}
+             </div>
+           </div>
+
+           <div>
+             <h4 className="font-semibold text-slate-800 mb-2 flex items-center gap-2">
+                <Download className="w-4 h-4 text-slate-500" /> Backup & Restore
+             </h4>
+             <p className="text-xs text-slate-500 mb-3">Manually export data to a file or import from a backup.</p>
              <div className="grid grid-cols-2 gap-3">
                 <Button variant="secondary" onClick={handleExport} className="text-xs h-10">
-                  <Download className="w-4 h-4" /> Export
+                  Export JSON
                 </Button>
                 <label className="bg-slate-100 text-slate-700 hover:bg-slate-200 px-4 py-3 rounded-xl font-semibold text-xs transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer h-10">
-                  <Upload className="w-4 h-4" /> Import
+                  <Upload className="w-4 h-4" /> Import JSON
                   <input type="file" className="hidden" accept=".json" onChange={handleImport} />
                 </label>
              </div>
@@ -256,11 +391,11 @@ const App: React.FC = () => {
            {users.length > 0 && (
              <div>
                <h4 className="font-semibold text-slate-800 mb-2">Manage Profiles</h4>
-               <div className="space-y-2 max-h-40 overflow-y-auto">
+               <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
                  {users.map(u => (
                    <div key={u.id} className="flex justify-between items-center bg-slate-50 p-3 rounded-lg">
-                     <span className="text-sm font-medium">{u.name}</span>
-                     <button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500">
+                     <span className="text-sm font-medium text-slate-700">{u.name}</span>
+                     <button onClick={() => handleDeleteUser(u.id)} className="text-slate-400 hover:text-red-500 p-1">
                        <Trash2 className="w-4 h-4" />
                      </button>
                    </div>
